@@ -1,0 +1,1 @@
+with open(r c:\Perso\projets\ha\TempoVision\custom_components\tempovision\sensor.py,r,encoding=utf-8) as f:\n    \n    for i,line in enumerate(f,1):\n        if i >= 100:\n            print(i,repr(line))\n

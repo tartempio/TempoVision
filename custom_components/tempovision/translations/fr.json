@@ -1,0 +1,23 @@
+{
+    "config": {
+        "step": {
+            "user": {
+                "title": "Configuration TempoVision",
+                "description": "Voulez-vous paramétrer l'affichage des probabilités ?",
+                "data": {
+                    "separate_probabilities": "Exposer chaque pourcentage de couleur dans des entités séparées"
+                }
+            }
+        }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Options TempoVision",
+                "data": {
+                    "separate_probabilities": "Exposer chaque pourcentage de couleur dans des entités séparées"
+                }
+            }
+        }
+    }
+}

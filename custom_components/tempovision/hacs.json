@@ -1,0 +1,10 @@
+{
+  "name": "TempoVision",
+  "display_name": "TempoVision",
+  "version": "1.0.0",
+  "homeassistant": "2023.1.0",
+  "zip_release": false,
+  "filename": "tempovision.zip",
+  "content_in_root": false,
+  "domains": ["sensor"]
+}
