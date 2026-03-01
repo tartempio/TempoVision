@@ -3,8 +3,6 @@
 [![License][license-shield]](LICENSE)
 [![hacs][hacsbadge]][hacs]
 
-*Read this in other languages: [English](README.md), [Français](README.fr.md).*
-
 [releases-shield]: https://img.shields.io/github/release/tartempio/TempoVision.svg?style=for-the-badge
 [releases]: https://github.com/tartempio/TempoVision/releases
 [commits-shield]: https://img.shields.io/github/commit-activity/y/tartempio/TempoVision.svg?style=for-the-badge
@@ -31,6 +29,10 @@ L'audience de cette intégration étant principalement française, cette documen
 ## Installation
 
 ### Via HACS (Recommandé)
+
+[![Open your Home Assistant instance and open a repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=tartempio&repository=TempoVision&category=integration)
+
+Ou manuellement:
 
 1. Ouvrez **HACS** dans votre instance Home Assistant.
 2. Allez dans **Intégrations**.
