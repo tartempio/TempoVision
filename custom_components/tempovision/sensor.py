@@ -1,10 +1,12 @@
 """Sensor platform for the TempoVision integration."""
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import re
-from typing import Any
+from typing import Any, Optional
+
+from homeassistant.util import dt as dt_util
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -26,6 +28,62 @@ from .const import (
     CONF_SEPARATE_PROB_ENTITIES,
     DEFAULT_SEPARATE_PROB_ENTITIES,
 )
+
+# mapping of french month names to month numbers for date parsing
+MONTHS: dict[str, int] = {
+    "janvier": 1,
+    "février": 2,
+    "fevrier": 2,
+    "mars": 3,
+    "avril": 4,
+    "mai": 5,
+    "juin": 6,
+    "juillet": 7,
+    "août": 8,
+    "aout": 8,
+    "septembre": 9,
+    "octobre": 10,
+    "novembre": 11,
+    "décembre": 12,
+    "decembre": 12,
+}
+
+
+def _date_str_to_timestamp(date_str: str) -> Optional[int]:
+    """Convert a french date string (e.g. "lundi 2 mars") to a Unix timestamp.
+
+    If no year is provided the current year is assumed.  Returns ``None`` if the
+    string cannot be parsed.  The resulting datetime is converted to UTC using
+    Home Assistant utilities so that the timestamp is consistent with HA's
+    timezone handling.
+    """
+    parts = date_str.lower().split()
+    # first word is weekday, drop it if present
+    if parts and parts[0] in WEEKDAYS:
+        parts = parts[1:]
+    if len(parts) < 2:
+        return None
+    try:
+        day = int(parts[0])
+    except ValueError:  # not a number
+        return None
+    month_name = parts[1]
+    year = datetime.now().year
+    if len(parts) >= 3:
+        try:
+            year = int(parts[2])
+        except ValueError:
+            pass
+    month = MONTHS.get(month_name)
+    if not month:
+        return None
+    try:
+        dt = datetime(year, month, day)
+    except ValueError:
+        return None
+    # convert naive datetime to UTC
+    dt_utc = dt_util.as_utc(dt)
+    return int(dt_utc.timestamp())
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -124,7 +182,8 @@ def parse_tempo_page(html: str) -> dict:
                             match = re.search(r"Tempo\s+(Bleu|Blanc|Rouge)", card_text, re.IGNORECASE)
                             if match:
                                 color = match.group(1).capitalize()
-                                results[date_str] = {"color": color, "probs": {}, "date": date_str}
+                                ts = _date_str_to_timestamp(date_str)
+                                results[date_str] = {"color": color, "probs": {}, "date": date_str, "timestamp": ts}
                                 days_in_order.append(date_str)
 
     # 2. Parse Predictions (Prévisions) for the next 5 days
@@ -155,7 +214,8 @@ def parse_tempo_page(html: str) -> dict:
                                     prob_val = float(match.group(2).replace(",", "."))
                                     probs[p_color] = prob_val
                         
-                        results[date_str] = {"color": color, "probs": probs, "date": date_str}
+                        ts = _date_str_to_timestamp(date_str)
+                        results[date_str] = {"color": color, "probs": probs, "date": date_str, "timestamp": ts}
                         days_in_order.append(date_str)
 
     # Convert to J+X structure
@@ -199,6 +259,9 @@ class TempoSensor(Entity):
         attrs: dict[str, Any] = {"jour": self.day_key}
         if "date" in data:
             attrs["date"] = data["date"]
+        # timestamp should be derived from the date string if available
+        if "timestamp" in data and data["timestamp"] is not None:
+            attrs["timestamp"] = data["timestamp"]
         if "probs" in data and data["probs"]:
             for color, prob in data["probs"].items():
                 attrs[f"prob_{color.lower()}"] = prob
@@ -243,6 +306,8 @@ class TempoProbabilitySensor(Entity):
         attrs: dict[str, Any] = {"jour": self.day_key}
         if "date" in data:
             attrs["date"] = data["date"]
+        if "timestamp" in data and data["timestamp"] is not None:
+            attrs["timestamp"] = data["timestamp"]
         return attrs
 
     async def async_update(self) -> None:
