@@ -78,11 +78,14 @@ def _date_str_to_timestamp(date_str: str) -> Optional[int]:
     if not month:
         return None
     try:
-        dt = datetime(year, month, day)
-    except ValueError:
+        # assume 06:00 in Paris local time as per new requirement
+        from zoneinfo import ZoneInfo
+        paris = ZoneInfo("Europe/Paris")
+        dt = datetime(year, month, day, 6, tzinfo=paris)
+    except Exception:
         return None
-    # convert naive datetime to UTC
-    dt_utc = dt_util.as_utc(dt)
+    # convert to UTC timestamp
+    dt_utc = dt.astimezone(dt_util.UTC)
     return int(dt_utc.timestamp())
 
 _LOGGER = logging.getLogger(__name__)
@@ -258,13 +261,29 @@ class TempoSensor(Entity):
         data = self.coordinator.data.get(self.day_key, {})
         attrs: dict[str, Any] = {"jour": self.day_key}
         if "date" in data:
-            attrs["date"] = data["date"]
-        # timestamp should be derived from the date string if available
-        if "timestamp" in data and data["timestamp"] is not None:
-            attrs["timestamp"] = data["timestamp"]
+            # change the date string to a datetime at 06:00 Paris
+            date_str = data["date"]
+            dt_obj = None
+            try:
+                # reuse timestamp helper for basic parsing
+                ts = _date_str_to_timestamp(date_str)
+                if ts is not None:
+                    # build Paris timezone aware datetime at 6h
+                    from zoneinfo import ZoneInfo
+                    paris = ZoneInfo("Europe/Paris")
+                    naive = datetime.fromtimestamp(ts, tz=dt_util.UTC)
+                    # naive currently UTC midnight; convert to Paris date
+                    dt_obj = naive.astimezone(paris).replace(hour=6, minute=0, second=0, microsecond=0)
+            except Exception:
+                dt_obj = None
+            if dt_obj:
+                attrs["date"] = dt_obj.isoformat()
+            else:
+                attrs["date"] = date_str
         if "probs" in data and data["probs"]:
             for color, prob in data["probs"].items():
-                attrs[f"prob_{color.lower()}"] = prob
+                # rename prob attributes to full word
+                attrs[f"Probabilité {color}"] = prob
         return attrs
 
     async def async_update(self) -> None:
@@ -305,7 +324,22 @@ class TempoProbabilitySensor(Entity):
         data = self.coordinator.data.get(self.day_key, {})
         attrs: dict[str, Any] = {"jour": self.day_key}
         if "date" in data:
-            attrs["date"] = data["date"]
+            # convert as above for probability sensor as well
+            date_str = data["date"]
+            dt_obj = None
+            try:
+                ts = _date_str_to_timestamp(date_str)
+                if ts is not None:
+                    from zoneinfo import ZoneInfo
+                    paris = ZoneInfo("Europe/Paris")
+                    naive = datetime.fromtimestamp(ts, tz=dt_util.UTC)
+                    dt_obj = naive.astimezone(paris).replace(hour=6, minute=0, second=0, microsecond=0)
+            except Exception:
+                dt_obj = None
+            if dt_obj:
+                attrs["date"] = dt_obj.isoformat()
+            else:
+                attrs["date"] = date_str
         if "timestamp" in data and data["timestamp"] is not None:
             attrs["timestamp"] = data["timestamp"]
         return attrs
