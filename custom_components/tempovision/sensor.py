@@ -12,6 +12,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.device_registry import DeviceInfo, DeviceEntryType
 from homeassistant.const import PERCENTAGE
@@ -19,6 +20,7 @@ from homeassistant.helpers.update_coordinator import (
     DataUpdateCoordinator,
     UpdateFailed,
 )
+from homeassistant.helpers.event import async_call_later
 
 from .const import (
     DOMAIN, 
@@ -88,9 +90,12 @@ def _date_str_to_timestamp(date_str: str) -> Optional[int]:
     dt_utc = dt.astimezone(dt_util.UTC)
     return int(dt_utc.timestamp())
 
+
+# logger used by this module (needed by coordinator initializer)
 _LOGGER = logging.getLogger(__name__)
 
-SCAN_INTERVAL = timedelta(hours=2)
+# initial fallback interval (will be overridden dynamically)
+SCAN_INTERVAL = timedelta(hours=1)
 
 
 async def async_setup_entry(
@@ -119,6 +124,8 @@ async def async_setup_entry(
             for color in TEMPO_COLOURS:
                 sensors.append(TempoProbabilitySensor(coordinator, day, color))
 
+    # button entity is managed by the button platform
+
     async_add_entities(sensors, True)
 
 
@@ -132,20 +139,60 @@ class TempoDataUpdateCoordinator(DataUpdateCoordinator[dict]):
             name="tempo",
             update_interval=SCAN_INTERVAL,
         )
+        # start a self‑rescheduling timer that adapts depending on time of day
+        self._unsub_refresh: Optional[callable] = None
+        # immediately schedule first run; fire-and-forget the coroutine
+        hass.async_create_task(self._schedule_next())
+
+    def _compute_interval(self) -> timedelta:
+        """Return next interval based on current local time.
+
+        Between 06:00 and 08:00 Paris time we refresh every 5 minutes; outside
+        those hours we update hourly.
+        """
+        now = dt_util.now().astimezone(dt_util.DEFAULT_TIME_ZONE)
+        # ensure Paris zone if available
+        try:
+            from zoneinfo import ZoneInfo
+
+            paris = ZoneInfo("Europe/Paris")
+            now = now.astimezone(paris)
+        except Exception:
+            pass
+        if 6 <= now.hour < 8:
+            return timedelta(minutes=5)
+        return timedelta(hours=1)
+
+    async def _schedule_next(self, *_: Any) -> None:
+        """Refresh data and schedule the next call."""
+        await self.async_request_refresh()
+        interval = self._compute_interval()
+        # cancel previous timer if any
+        if self._unsub_refresh is not None:
+            self._unsub_refresh()
+        # schedule with a wrapper so the coroutine is created as a task
+        def _later(_: Any) -> None:
+            self.hass.async_create_task(self._schedule_next())
+
+        self._unsub_refresh = async_call_later(self.hass, interval.total_seconds(), _later)
 
     async def _async_update_data(self) -> dict:
         """Fetch data from the remote tempo site."""
         session = aiohttp_client.async_get_clientsession(self.hass)
         try:
+            # fetch page
             response = await session.get(TARGET_URL, timeout=30)
             response.raise_for_status()
             text = await response.text()
+            # fetched text
         except Exception as err:  # pylint: disable=broad-except
+            # error logged by UpdateFailed exception
             raise UpdateFailed(f"Error fetching tempo page: {err}")
 
         data = parse_tempo_page(text)
         if not data:
             raise UpdateFailed("No tempo information could be parsed")
+        # successful parse, return data
         return data
 
 
@@ -230,13 +277,13 @@ def parse_tempo_page(html: str) -> dict:
     return final_dict
 
 
-class TempoSensor(Entity):
+class TempoSensor(CoordinatorEntity, Entity):
     """Representation of a single day sensor (J+X)."""
 
     def __init__(self, coordinator: TempoDataUpdateCoordinator, day_key: str) -> None:
-        self.coordinator = coordinator
+        super().__init__(coordinator)
         self.day_key = day_key
-        self._attr_name = f"Tempo {day_key}"
+        self._attr_name = f"TempoVision {day_key}"
         self._attr_unique_id = f"{DOMAIN}_{self.day_key.replace('+', '_')}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, "tempovision_service")},
@@ -282,22 +329,20 @@ class TempoSensor(Entity):
                 attrs["date"] = date_str
         if "probs" in data and data["probs"]:
             for color, prob in data["probs"].items():
-                # rename prob attributes to full word
-                attrs[f"Probabilité {color}"] = prob
+                # expose lowercase/underscore attributes for probabilities
+                attrs[f"probabilite_{color.lower()}"] = prob
         return attrs
 
-    async def async_update(self) -> None:
-        await self.coordinator.async_request_refresh()
-
-class TempoProbabilitySensor(Entity):
+class TempoProbabilitySensor(CoordinatorEntity, Entity):
     """Representation of a single day probability sensor (J+X)."""
 
     def __init__(self, coordinator: TempoDataUpdateCoordinator, day_key: str, color: str) -> None:
-        self.coordinator = coordinator
+        super().__init__(coordinator)
         self.day_key = day_key
         self.color = color
-        self._attr_name = f"Tempo {day_key} Probabilité {color}"
-        self._attr_unique_id = f"{DOMAIN}_{self.day_key.replace('+', '_')}_prob_{color.lower()}"
+        self._attr_name = f"TempoVision {day_key} Probabilité {color}"
+        # use "probabilite" in the identifier to match new ID requirement
+        self._attr_unique_id = f"{DOMAIN}_{self.day_key.replace('+', '_')}_probabilite_{color.lower()}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, "tempovision_service")},
             name="TempoVision",
@@ -343,6 +388,3 @@ class TempoProbabilitySensor(Entity):
         if "timestamp" in data and data["timestamp"] is not None:
             attrs["timestamp"] = data["timestamp"]
         return attrs
-
-    async def async_update(self) -> None:
-        await self.coordinator.async_request_refresh()

@@ -1,7 +1,8 @@
 """Constants for the TempoVision integration."""
 
 DOMAIN = "tempovision"
-PLATFORMS = ["sensor"]
+# supported platforms – sensor already, add button for manual refresh
+PLATFORMS = ["sensor", "button"]
 
 # scraping
 TARGET_URL = "https://www.kelwatt.fr/fournisseurs/edf/tempo"
