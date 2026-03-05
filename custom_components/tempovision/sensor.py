@@ -97,6 +97,10 @@ _LOGGER = logging.getLogger(__name__)
 # initial fallback interval (will be overridden dynamically)
 SCAN_INTERVAL = timedelta(hours=1)
 
+# Fixed list of all day keys – always create entities for each of these,
+# even when the upstream site does not yet publish data for a given day.
+ALL_DAYS = ["J"] + [f"J+{i}" for i in range(1, 9)]  # J, J+1 … J+8
+
 
 async def async_setup_entry(
     hass: HomeAssistant, 
@@ -111,14 +115,18 @@ async def async_setup_entry(
         data["coordinator"] = coordinator
         await coordinator.async_config_entry_first_refresh()
 
-    # create one entity per weekday provided by coordinator data
+    # Always create one entity per day key (J to J+8), regardless of
+    # whether the coordinator already has data for that day.  This ensures
+    # J+8 is always present even when the upstream site has not yet
+    # published it, and prevents entities from disappearing after the
+    # first day.
     sensors: list[Entity] = []
-    
+
     separate_probs = entry.options.get(
         CONF_SEPARATE_PROB_ENTITIES, DEFAULT_SEPARATE_PROB_ENTITIES
     )
-    
-    for day in coordinator.data.keys():
+
+    for day in ALL_DAYS:
         sensors.append(TempoSensor(coordinator, day))
         if separate_probs and day not in ("J", "J+1"):
             for color in TEMPO_COLOURS:
@@ -235,8 +243,9 @@ def parse_tempo_page(html: str) -> dict:
                                 ts = _date_str_to_timestamp(date_str)
                                 results[date_str] = {"color": color, "probs": {}, "date": date_str, "timestamp": ts}
                                 days_in_order.append(date_str)
+                                _LOGGER.debug("Parsed %s: %s -> %s", text, date_str, color)
 
-    # 2. Parse Predictions (Prévisions) for the next 5 days
+    # 2. Parse Predictions (Prévisions) for the upcoming days
     for card in soup.find_all("div", class_=lambda x: x and "card" in x):
         header = card.find("div", class_="card-score__header")
         if header:
@@ -245,28 +254,47 @@ def parse_tempo_page(html: str) -> dict:
                 date_str = title_p.get_text(strip=True).lower()
                 day_str = date_str.split(" ")[0]
                 if day_str in WEEKDAYS and date_str not in results:
+                    # Try to find an explicit confirmed colour in a <strong> tag
                     color = None
                     for strong in card.find_all("strong"):
                         color_text = strong.get_text(strip=True).capitalize()
                         if color_text in TEMPO_COLOURS:
                             color = color_text
                             break
-                    
+
+                    # Parse probabilities regardless of whether colour is confirmed
+                    probs = {"Bleu": 0.0, "Blanc": 0.0, "Rouge": 0.0}
+                    prob_bar = card.find("div", class_="probability-bar")
+                    if prob_bar:
+                        for div in prob_bar.find_all("div", title=True):
+                            title = div.get("title", "")
+                            match = re.search(r"(Bleu|Blanc|Rouge)\s*:\s*([\d,.]+)\s*%", title)
+                            if match:
+                                p_color = match.group(1).capitalize()
+                                prob_val = float(match.group(2).replace(",", "."))
+                                probs[p_color] = prob_val
+
+                    # If no explicit colour, derive it from the highest probability
+                    if color is None and any(v > 0 for v in probs.values()):
+                        color = max(probs, key=lambda c: probs[c])
+                        _LOGGER.debug(
+                            "No explicit colour for %s, derived from probs: %s -> %s",
+                            date_str, probs, color,
+                        )
+
                     if color:
-                        probs = {"Bleu": 0.0, "Blanc": 0.0, "Rouge": 0.0}
-                        prob_bar = card.find("div", class_="probability-bar")
-                        if prob_bar:
-                            for div in prob_bar.find_all("div", title=True):
-                                title = div.get("title", "")
-                                match = re.search(r"(Bleu|Blanc|Rouge)\s*:\s*([\d,.]+)\s*%", title)
-                                if match:
-                                    p_color = match.group(1).capitalize()
-                                    prob_val = float(match.group(2).replace(",", "."))
-                                    probs[p_color] = prob_val
-                        
                         ts = _date_str_to_timestamp(date_str)
                         results[date_str] = {"color": color, "probs": probs, "date": date_str, "timestamp": ts}
                         days_in_order.append(date_str)
+                        _LOGGER.debug("Parsed prediction %s -> %s (probs: %s)", date_str, color, probs)
+                    else:
+                        _LOGGER.debug("Skipped card for %s: no colour and no probability data", date_str)
+
+    _LOGGER.debug(
+        "parse_tempo_page: found %d days: %s",
+        len(days_in_order),
+        days_in_order,
+    )
 
     # Convert to J+X structure
     final_dict = {}
@@ -274,6 +302,7 @@ def parse_tempo_page(html: str) -> dict:
         offset_name = "J" if i == 0 else f"J+{i}"
         final_dict[offset_name] = results[date_str]
 
+    _LOGGER.debug("parse_tempo_page result keys: %s", list(final_dict.keys()))
     return final_dict
 
 
@@ -294,7 +323,13 @@ class TempoSensor(CoordinatorEntity, Entity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.last_update_success
+        # The coordinator must have succeeded AND the day's data must be
+        # present.  When a day (typically J+8) is not yet published on the
+        # site the entity is marked unavailable so HA shows it as "unknown"
+        # rather than displaying a stale or incorrect value.
+        if not self.coordinator.last_update_success:
+            return False
+        return self.day_key in self.coordinator.data
 
     @property
     def state(self) -> Any | None:
@@ -354,7 +389,10 @@ class TempoProbabilitySensor(CoordinatorEntity, Entity):
 
     @property
     def available(self) -> bool:
-        return self.coordinator.last_update_success
+        # Same logic as TempoSensor: mark unavailable when the day has no data.
+        if not self.coordinator.last_update_success:
+            return False
+        return self.day_key in self.coordinator.data
 
     @property
     def state(self) -> Any | None:
