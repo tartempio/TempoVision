@@ -2,13 +2,19 @@
   "domain": "tempovision",
   "name": "TempoVision",
   "version": "1.0.2",
-  "documentation": "",
+  "documentation": "https://github.com/tartempio/TempoVision",
+  "issue_tracker": "https://github.com/tartempio/TempoVision/issues",
   "requirements": [
     "beautifulsoup4"
   ],
   "dependencies": [],
-  "codeowners": [],
+  "codeowners": [
+    "@tartempio"
+  ],
   "config_flow": true,
   "iot_class": "cloud_polling",
-  "platforms": ["sensor", "button"]
+  "platforms": [
+    "sensor",
+    "button"
+  ]
 }
