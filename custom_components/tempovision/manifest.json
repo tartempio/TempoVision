@@ -1,7 +1,7 @@
 {
   "domain": "tempovision",
   "name": "TempoVision",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "documentation": "https://github.com/tartempio/TempoVision",
   "issue_tracker": "https://github.com/tartempio/TempoVision/issues",
   "requirements": [
