@@ -1,11 +1,8 @@
 """Button platform for TempoVision integration."""
 from __future__ import annotations
 
-from typing import Any
-
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.device_registry import DeviceInfo, DeviceEntryType
 from homeassistant.components.button import ButtonEntity
 
@@ -23,9 +20,11 @@ async def async_setup_entry(
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     coordinator: TempoDataUpdateCoordinator | None = data.get("coordinator")
     if coordinator is None:
-        coordinator = TempoDataUpdateCoordinator(hass)
-        data["coordinator"] = coordinator
-        await coordinator.async_config_entry_first_refresh()
+        raise RuntimeError(
+            "TempoVision coordinator is missing during button setup. "
+            "This may indicate an integration initialization issue. "
+            "Try reloading the TempoVision integration from the Home Assistant UI."
+        )
 
     async_add_entities([TempoRefreshButton(coordinator)], True)
 

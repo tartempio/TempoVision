@@ -100,6 +100,8 @@ SCAN_INTERVAL = timedelta(hours=1)
 # Fixed list of all day keys – always create entities for each of these,
 # even when the upstream site does not yet publish data for a given day.
 ALL_DAYS = ["J"] + [f"J+{i}" for i in range(1, 9)]  # J, J+1 … J+8
+WEEKDAY_RE = r"(?:lundi|mardi|mercredi|jeudi|vendredi|samedi|dimanche)"
+DATE_RE = rf"{WEEKDAY_RE}\s+\d{{1,2}}\s+[a-zA-Zéèêëàâäîïôöùûüç]+(?:\s+\d{{4}})?"
 
 
 async def async_setup_entry(
@@ -111,9 +113,11 @@ async def async_setup_entry(
     data = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
     coordinator: TempoDataUpdateCoordinator | None = data.get("coordinator")
     if coordinator is None:
-        coordinator = TempoDataUpdateCoordinator(hass)
-        data["coordinator"] = coordinator
-        await coordinator.async_config_entry_first_refresh()
+        raise RuntimeError(
+            "TempoVision coordinator is missing during sensor setup. This may "
+            "indicate an integration initialization issue. Try reloading the "
+            "TempoVision integration from the Home Assistant UI."
+        )
 
     # Always create one entity per day key (J to J+8), regardless of
     # whether the coordinator already has data for that day.  This ensures
@@ -221,7 +225,21 @@ def parse_tempo_page(html: str) -> dict:
         return results
 
     soup = BeautifulSoup(html, "html.parser")
-    days_in_order = []
+    days_in_order: list[str] = []
+
+    def _register_day(date_str: str, color: str | None, probs: dict[str, float] | None = None) -> None:
+        """Store parsed data for a day while preserving first-seen ordering."""
+        if color is None:
+            return
+        ts = _date_str_to_timestamp(date_str)
+        results[date_str] = {
+            "color": color,
+            "probs": probs or {},
+            "date": date_str,
+            "timestamp": ts,
+        }
+        if date_str not in days_in_order:
+            days_in_order.append(date_str)
 
     # 1. Parse Today and Tomorrow
     for text in ["Aujourd'hui", "Demain"]:
@@ -240,9 +258,7 @@ def parse_tempo_page(html: str) -> dict:
                             match = re.search(r"Tempo\s+(Bleu|Blanc|Rouge)", card_text, re.IGNORECASE)
                             if match:
                                 color = match.group(1).capitalize()
-                                ts = _date_str_to_timestamp(date_str)
-                                results[date_str] = {"color": color, "probs": {}, "date": date_str, "timestamp": ts}
-                                days_in_order.append(date_str)
+                                _register_day(date_str, color, {})
                                 _LOGGER.debug("Parsed %s: %s -> %s", text, date_str, color)
 
     # 2. Parse Predictions (Prévisions) for the upcoming days
@@ -271,24 +287,69 @@ def parse_tempo_page(html: str) -> dict:
                             match = re.search(r"(Bleu|Blanc|Rouge)\s*:\s*([\d,.]+)\s*%", title)
                             if match:
                                 p_color = match.group(1).capitalize()
-                                prob_val = float(match.group(2).replace(",", "."))
+                    if color is None and probs and any(v > 0 for v in probs.values()):
                                 probs[p_color] = prob_val
 
                     # If no explicit colour, derive it from the highest probability
                     if color is None and any(v > 0 for v in probs.values()):
-                        color = max(probs, key=lambda c: probs[c])
+                        color = max(probs.items(), key=lambda item: item[1])[0]
                         _LOGGER.debug(
                             "No explicit colour for %s, derived from probs: %s -> %s",
                             date_str, probs, color,
                         )
 
                     if color:
-                        ts = _date_str_to_timestamp(date_str)
-                        results[date_str] = {"color": color, "probs": probs, "date": date_str, "timestamp": ts}
-                        days_in_order.append(date_str)
+                        _register_day(date_str, color, probs)
                         _LOGGER.debug("Parsed prediction %s -> %s (probs: %s)", date_str, color, probs)
                     else:
                         _LOGGER.debug("Skipped card for %s: no colour and no probability data", date_str)
+
+    # 3. Text fallback parsing for predictions.
+    # The website structure changes frequently; this keeps extraction stable even
+    # when class names differ while the visible text format remains the same.
+    raw_text = soup.get_text(" ", strip=True).replace("\xa0", " ")
+    normalized_text = re.sub(r"\s+", " ", raw_text)
+
+    # Fallback for Aujourd'hui / Demain blocks when class-based parsing fails.
+    for block_name in ("Aujourd'hui", "Demain"):
+        pattern = re.compile(
+            rf"{re.escape(block_name)}\s+({DATE_RE})\s+Tempo\s+(Bleu|Blanc|Rouge)",
+            re.IGNORECASE,
+        )
+        match = pattern.search(normalized_text)
+        if match:
+            date_str = match.group(1).lower()
+            color = match.group(2).capitalize()
+            if date_str not in results:
+                _register_day(date_str, color, {})
+                _LOGGER.debug("Fallback parsed %s: %s -> %s", block_name, date_str, color)
+
+    prediction_pattern = re.compile(
+        rf"({DATE_RE})\s+((?:(?:Bleu|Blanc|Rouge)\s*[\d,.]+\s*%\s*){{1,3}})",
+        re.IGNORECASE,
+    )
+    prob_pattern = re.compile(r"(Bleu|Blanc|Rouge)\s*([\d,.]+)\s*%", re.IGNORECASE)
+
+    for match in prediction_pattern.finditer(normalized_text):
+        date_str = match.group(1).lower()
+        probs_text = match.group(2)
+
+        # Ignore pure Aujourd'hui/Demain cards that don't expose probabilities.
+        if date_str in results and results[date_str].get("probs"):
+            continue
+
+        probs = {"Bleu": 0.0, "Blanc": 0.0, "Rouge": 0.0}
+        for prob_match in prob_pattern.finditer(probs_text):
+        if not probs or not any(v > 0 for v in probs.values()):
+            prob_val = float(prob_match.group(2).replace(",", "."))
+            probs[p_color] = prob_val
+
+        if not any(v > 0 for v in probs.values()):
+            continue
+
+        color = max(probs.items(), key=lambda item: item[1])[0]
+        _register_day(date_str, color, probs)
+        _LOGGER.debug("Fallback parsed prediction %s -> %s (probs: %s)", date_str, color, probs)
 
     _LOGGER.debug(
         "parse_tempo_page: found %d days: %s",
@@ -296,11 +357,40 @@ def parse_tempo_page(html: str) -> dict:
         days_in_order,
     )
 
-    # Convert to J+X structure
+    # Convert to J+X structure using the actual date offset from today.
+    # This avoids the fragile position-based mapping that could shift labels
+    # when the site publishes fewer/more days or the parser skips a day.
     final_dict = {}
-    for i, date_str in enumerate(days_in_order):
-        offset_name = "J" if i == 0 else f"J+{i}"
-        final_dict[offset_name] = results[date_str]
+    try:
+        from zoneinfo import ZoneInfo
+        paris = ZoneInfo("Europe/Paris")
+        today = datetime.now(paris).date()
+    except Exception:
+        today = datetime.now().date()
+
+    for date_str in days_in_order:
+        ts = results[date_str].get("timestamp")
+        if ts is not None:
+            try:
+                from zoneinfo import ZoneInfo
+                paris = ZoneInfo("Europe/Paris")
+                parsed_date = datetime.fromtimestamp(ts, tz=paris).date()
+                delta = (parsed_date - today).days
+                if delta < 0:
+                    offset_name = "J"  # today or past → J
+                elif delta == 0:
+                    offset_name = "J"
+                else:
+                    offset_name = f"J+{delta}"
+            except Exception:
+                offset_name = None
+        else:
+            offset_name = None
+
+        if offset_name is not None and offset_name in ALL_DAYS:
+            final_dict[offset_name] = results[date_str]
+        else:
+            _LOGGER.debug("parse_tempo_page: skipped %s (offset=%s)", date_str, offset_name)
 
     _LOGGER.debug("parse_tempo_page result keys: %s", list(final_dict.keys()))
     return final_dict
@@ -323,13 +413,9 @@ class TempoSensor(CoordinatorEntity, Entity):
 
     @property
     def available(self) -> bool:
-        # The coordinator must have succeeded AND the day's data must be
-        # present.  When a day (typically J+8) is not yet published on the
-        # site the entity is marked unavailable so HA shows it as "unknown"
-        # rather than displaying a stale or incorrect value.
-        if not self.coordinator.last_update_success:
-            return False
-        return self.day_key in self.coordinator.data
+        # Keep entity available as long as refresh succeeds. Missing day values
+        # are surfaced as state None -> Home Assistant displays "unknown".
+        return self.coordinator.last_update_success
 
     @property
     def state(self) -> Any | None:
@@ -389,10 +475,7 @@ class TempoProbabilitySensor(CoordinatorEntity, Entity):
 
     @property
     def available(self) -> bool:
-        # Same logic as TempoSensor: mark unavailable when the day has no data.
-        if not self.coordinator.last_update_success:
-            return False
-        return self.day_key in self.coordinator.data
+        return self.coordinator.last_update_success
 
     @property
     def state(self) -> Any | None:

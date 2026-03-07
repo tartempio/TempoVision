@@ -9,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN, PLATFORMS
+from .sensor import TempoDataUpdateCoordinator
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -25,7 +26,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     The real work happens in each platform (sensor).
     """
-    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {}
+    coordinator = TempoDataUpdateCoordinator(hass)
+    await coordinator.async_config_entry_first_refresh()
+    hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"coordinator": coordinator}
 
     entry.async_on_unload(entry.add_update_listener(update_listener))
 
