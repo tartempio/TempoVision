@@ -287,7 +287,7 @@ def parse_tempo_page(html: str) -> dict:
                             match = re.search(r"(Bleu|Blanc|Rouge)\s*:\s*([\d,.]+)\s*%", title)
                             if match:
                                 p_color = match.group(1).capitalize()
-                    if color is None and probs and any(v > 0 for v in probs.values()):
+                                prob_val = float(match.group(2).replace(",", "."))
                                 probs[p_color] = prob_val
 
                     # If no explicit colour, derive it from the highest probability
@@ -340,7 +340,7 @@ def parse_tempo_page(html: str) -> dict:
 
         probs = {"Bleu": 0.0, "Blanc": 0.0, "Rouge": 0.0}
         for prob_match in prob_pattern.finditer(probs_text):
-        if not probs or not any(v > 0 for v in probs.values()):
+            p_color = prob_match.group(1).capitalize()
             prob_val = float(prob_match.group(2).replace(",", "."))
             probs[p_color] = prob_val
 

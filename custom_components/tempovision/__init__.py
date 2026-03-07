@@ -9,7 +9,6 @@ from homeassistant.core import HomeAssistant
 from homeassistant.config_entries import ConfigEntry
 
 from .const import DOMAIN, PLATFORMS
-from .sensor import TempoDataUpdateCoordinator
 
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
@@ -26,6 +25,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     The real work happens in each platform (sensor).
     """
+    # Import lazily so loading config_flow does not require importing platform code.
+    from .sensor import TempoDataUpdateCoordinator
+
     coordinator = TempoDataUpdateCoordinator(hass)
     await coordinator.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"coordinator": coordinator}
