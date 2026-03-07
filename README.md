@@ -13,8 +13,6 @@
 
 # TempoVision
 
-*Nouvelles fonctionnalités (mars 2026) : planification dynamique des mises à jour, identifiants de probabilités normalisés, et bouton d'actualisation.*
-
 TempoVision est une intégration personnalisée pour Home Assistant permettant de suivre et de prédire les couleurs du contrat **EDF Tempo** (Bleu, Blanc, Rouge) pour la semaine à venir.
 
 L'audience de cette intégration étant principalement française, cette documentation est rédigée en français.
