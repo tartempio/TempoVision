@@ -3,9 +3,44 @@
         "step": {
             "user": {
                 "title": "Configuration TempoVision",
-                "description": "Voulez-vous paramétrer l'affichage des probabilités ?",
+                "description": "Choisissez la source de simulation et vos options.",
                 "data": {
+                    "source": "Source de simulation",
                     "separate_probabilities": "Exposer chaque pourcentage de couleur dans des entités séparées"
+                }
+            }
+        }
+    },
+    "selector": {
+        "source": {
+            "options": {
+                "kelwatt": "Kelwatt",
+                "open_dpe": "Open-DPE"
+            }
+        }
+    },
+    "entity": {
+        "sensor": {
+            "tempo_day": {
+                "state_attributes": {
+                    "probabilite": {
+                        "name": "Probabilité"
+                    },
+                    "probabilite_bleu": {
+                        "name": "Probabilité Bleu"
+                    },
+                    "probabilite_blanc": {
+                        "name": "Probabilité Blanc"
+                    },
+                    "probabilite_rouge": {
+                        "name": "Probabilité Rouge"
+                    },
+                    "date": {
+                        "name": "Date"
+                    },
+                    "timestamp": {
+                        "name": "Timestamp"
+                    }
                 }
             }
         }
@@ -15,6 +50,7 @@
             "init": {
                 "title": "Options TempoVision",
                 "data": {
+                    "source": "Source de simulation",
                     "separate_probabilities": "Exposer chaque pourcentage de couleur dans des entités séparées"
                 }
             }

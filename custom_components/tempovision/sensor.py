@@ -23,12 +23,17 @@ from homeassistant.helpers.update_coordinator import (
 from homeassistant.helpers.event import async_call_later
 
 from .const import (
-    DOMAIN, 
-    TARGET_URL, 
-    WEEKDAYS, 
+    DOMAIN,
+    KELWATT_TARGET_URL,
+    OPEN_DPE_TARGET_URL,
+    WEEKDAYS,
     TEMPO_COLOURS,
+    CONF_SOURCE,
     CONF_SEPARATE_PROB_ENTITIES,
+    DEFAULT_SOURCE,
     DEFAULT_SEPARATE_PROB_ENTITIES,
+    SOURCE_KELWATT,
+    SOURCE_OPEN_DPE,
 )
 
 # mapping of french month names to month numbers for date parsing
@@ -105,8 +110,8 @@ DATE_RE = rf"{WEEKDAY_RE}\s+\d{{1,2}}\s+[a-zA-Zéèêëàâäîïôöùûüç]+(
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, 
-    entry: ConfigEntry, 
+    hass: HomeAssistant,
+    entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up sensors for a config entry."""
@@ -126,11 +131,18 @@ async def async_setup_entry(
     # first day.
     sensors: list[Entity] = []
 
+    source = entry.options.get(
+        CONF_SOURCE,
+        entry.data.get(CONF_SOURCE, DEFAULT_SOURCE),
+    )
     separate_probs = entry.options.get(
-        CONF_SEPARATE_PROB_ENTITIES, DEFAULT_SEPARATE_PROB_ENTITIES
+        CONF_SEPARATE_PROB_ENTITIES,
+        DEFAULT_SEPARATE_PROB_ENTITIES,
     )
 
-    for day in ALL_DAYS:
+    day_keys = ALL_DAYS if source == SOURCE_KELWATT else [f"J+{i}" for i in range(1, 9)]
+
+    for day in day_keys:
         sensors.append(TempoSensor(coordinator, day))
         if separate_probs and day not in ("J", "J+1"):
             for color in TEMPO_COLOURS:
@@ -144,12 +156,16 @@ async def async_setup_entry(
 class TempoDataUpdateCoordinator(DataUpdateCoordinator[dict]):
     """Coordinate updates for tempo data."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         super().__init__(
             hass,
             _LOGGER,
             name="tempo",
             update_interval=SCAN_INTERVAL,
+        )
+        self._source = entry.options.get(
+            CONF_SOURCE,
+            entry.data.get(CONF_SOURCE, DEFAULT_SOURCE),
         )
         # start a self‑rescheduling timer that adapts depending on time of day
         self._unsub_refresh: Optional[callable] = None
@@ -189,23 +205,82 @@ class TempoDataUpdateCoordinator(DataUpdateCoordinator[dict]):
         self._unsub_refresh = async_call_later(self.hass, interval.total_seconds(), _later)
 
     async def _async_update_data(self) -> dict:
-        """Fetch data from the remote tempo site."""
+        """Fetch data from the selected source."""
         session = aiohttp_client.async_get_clientsession(self.hass)
+        url = KELWATT_TARGET_URL if self._source == SOURCE_KELWATT else OPEN_DPE_TARGET_URL
         try:
-            # fetch page
-            response = await session.get(TARGET_URL, timeout=30)
+            response = await session.get(url, timeout=30)
             response.raise_for_status()
-            text = await response.text()
-            # fetched text
+
+            if self._source == SOURCE_OPEN_DPE:
+                payload = await response.json()
+                data = parse_open_dpe_payload(payload)
+            else:
+                text = await response.text()
+                data = parse_tempo_page(text)
         except Exception as err:  # pylint: disable=broad-except
             # error logged by UpdateFailed exception
-            raise UpdateFailed(f"Error fetching tempo page: {err}")
+            raise UpdateFailed(f"Error fetching tempo data: {err}")
 
-        data = parse_tempo_page(text)
         if not data:
             raise UpdateFailed("No tempo information could be parsed")
         # successful parse, return data
         return data
+
+
+def parse_open_dpe_payload(payload: Any) -> dict[str, dict[str, Any]]:
+    """Extract J/J+n color forecast and probabilities from Open-DPE JSON."""
+    if not isinstance(payload, list):
+        return {}
+
+    final_dict: dict[str, dict[str, Any]] = {}
+    try:
+        from zoneinfo import ZoneInfo
+
+        paris = ZoneInfo("Europe/Paris")
+    except Exception:
+        paris = dt_util.DEFAULT_TIME_ZONE
+    today = datetime.now(paris).date()
+
+    for row in payload:
+        if not isinstance(row, dict):
+            continue
+
+        date_str = row.get("date")
+        raw_color = row.get("tempo_color")
+        if not date_str or not raw_color:
+            continue
+
+        try:
+            parsed_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            continue
+
+        delta = (parsed_date - today).days
+        if delta < 0:
+            continue
+        offset_name = "J" if delta == 0 else f"J+{delta}"
+        if offset_name not in ALL_DAYS:
+            continue
+
+        color = str(raw_color).strip().capitalize()
+        probs = {"Bleu": 0.0, "Blanc": 0.0, "Rouge": 0.0}
+        for color_key in ("bleu", "blanc", "rouge"):
+            prob_val = row.get(f"probability_{color_key}", 0.0)
+            try:
+                prob_float = float(prob_val)
+                probs[color_key.capitalize()] = round(prob_float * 100, 2)
+            except (TypeError, ValueError):
+                pass
+
+        final_dict[offset_name] = {
+            "color": color,
+            "date": parsed_date.isoformat(),
+            "probs": probs,
+        }
+
+    _LOGGER.debug("parse_open_dpe_payload result keys: %s", list(final_dict.keys()))
+    return final_dict
 
 
 def parse_tempo_page(html: str) -> dict:
@@ -403,6 +478,7 @@ class TempoSensor(CoordinatorEntity, Entity):
         super().__init__(coordinator)
         self.day_key = day_key
         self._attr_name = f"TempoVision {day_key}"
+        self._attr_translation_key = "tempo_day"
         self._attr_unique_id = f"{DOMAIN}_{self.day_key.replace('+', '_')}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, "tempovision_service")},
@@ -427,25 +503,29 @@ class TempoSensor(CoordinatorEntity, Entity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data.get(self.day_key, {})
-        attrs: dict[str, Any] = {"jour": self.day_key}
+        attrs: dict[str, Any] = {}
+        
+        # Add main color probability if available
+        if "probs" in data and data["probs"]:
+            color = data.get("color")
+            if color and color in data["probs"]:
+                attrs["probabilite"] = data["probs"][color]
+        
         if "date" in data:
-            # change the date string to a datetime at 06:00 Paris
+            # expose date in ISO format (YYYY-MM-DD)
             date_str = data["date"]
-            dt_obj = None
+            parsed_date = None
             try:
                 # reuse timestamp helper for basic parsing
                 ts = _date_str_to_timestamp(date_str)
                 if ts is not None:
-                    # build Paris timezone aware datetime at 6h
                     from zoneinfo import ZoneInfo
                     paris = ZoneInfo("Europe/Paris")
-                    naive = datetime.fromtimestamp(ts, tz=dt_util.UTC)
-                    # naive currently UTC midnight; convert to Paris date
-                    dt_obj = naive.astimezone(paris).replace(hour=6, minute=0, second=0, microsecond=0)
+                    parsed_date = datetime.fromtimestamp(ts, tz=paris).date()
             except Exception:
-                dt_obj = None
-            if dt_obj:
-                attrs["date"] = dt_obj.isoformat()
+                parsed_date = None
+            if parsed_date:
+                attrs["date"] = parsed_date.isoformat()
             else:
                 attrs["date"] = date_str
         if "probs" in data and data["probs"]:
@@ -488,22 +568,21 @@ class TempoProbabilitySensor(CoordinatorEntity, Entity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data.get(self.day_key, {})
-        attrs: dict[str, Any] = {"jour": self.day_key}
+        attrs: dict[str, Any] = {}
         if "date" in data:
-            # convert as above for probability sensor as well
+            # expose date in ISO format (YYYY-MM-DD)
             date_str = data["date"]
-            dt_obj = None
+            parsed_date = None
             try:
                 ts = _date_str_to_timestamp(date_str)
                 if ts is not None:
                     from zoneinfo import ZoneInfo
                     paris = ZoneInfo("Europe/Paris")
-                    naive = datetime.fromtimestamp(ts, tz=dt_util.UTC)
-                    dt_obj = naive.astimezone(paris).replace(hour=6, minute=0, second=0, microsecond=0)
+                    parsed_date = datetime.fromtimestamp(ts, tz=paris).date()
             except Exception:
-                dt_obj = None
-            if dt_obj:
-                attrs["date"] = dt_obj.isoformat()
+                parsed_date = None
+            if parsed_date:
+                attrs["date"] = parsed_date.isoformat()
             else:
                 attrs["date"] = date_str
         if "timestamp" in data and data["timestamp"] is not None:

@@ -28,7 +28,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Import lazily so loading config_flow does not require importing platform code.
     from .sensor import TempoDataUpdateCoordinator
 
-    coordinator = TempoDataUpdateCoordinator(hass)
+    coordinator = TempoDataUpdateCoordinator(hass, entry)
     await coordinator.async_config_entry_first_refresh()
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {"coordinator": coordinator}
 
